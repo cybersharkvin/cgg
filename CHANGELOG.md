@@ -5,6 +5,106 @@ All notable changes to `cgg` are documented here. Format loosely follows
 pre-1.0, so the resolver's edge set may grow between releases (it only
 ever grows in default mode — see *Compatibility* below).
 
+## [Unreleased]
+
+### Fixed
+
+- **The Rust cross-file resolver emitted guessed edges at sites it had
+  already bound, into helpers it could not reach, and by bare name where
+  the receiver was known.** Measured on cgg's own tree: 1,976 of 5,449
+  edges were `cross-file:imports / medium`; 299 landed on a site the
+  intra-file pass had already resolved (the dedupe key included the
+  destination, so a fan-out to *other* destinations passed), 550 pointed
+  into another file's private `mod tests` helper, 212 came from calls
+  inside macro token trees whose receiver had been dropped, and 405 came
+  from a lowercase path-headed receiver (`super::dynuse::extract`,
+  `serde_json::from_str`) treated as a variable and fanned out. Every
+  class was found by reading the audit sidecar and confirmed against the
+  source before anything was changed.
+
+  Ten resolver changes, each with a unit test that fails on 0.8.3:
+  cross-file skips a site intra-file already bound, keyed
+  `(src, site_byte, name)` so chained calls at one byte survive; fan-out
+  candidates are filtered by `Vis::Private` and by a `::tests::` module
+  the caller does not import, with the fan-out cap judged *before* the
+  filter so a filter can only shrink an edge set; macro-argument calls
+  keep their receiver (`p.id()`, `NodeIds::resolve(..)`,
+  `TrustKind::Network.f()`), drop turbofish, retry bare only on a
+  crate-wide unique name, and bind through by-name fan-out only when a
+  single candidate survives (an impl preferred over its trait's own
+  declaration); `use crate::x::y;` and `pub use` chains have their
+  leading `crate`/`self`/`super` rewritten so they match the callable
+  index; a `::`-path receiver rewrites `crate`/`super`/`self` from the
+  caller, tries every prefix as an owner (enum-variant receivers,
+  builder chains), and matches an external-crate head only by full
+  path; `owner_from_qn` no longer files `<A as TryFrom<B>>::try_from`
+  under `B`; `<StdType as Trait>::m` impls are not indexed under the
+  bare std owner unless the workspace declares a type of that name;
+  let-type inference sees through `Arc/Rc/Box/RefCell/Cell/Mutex/RwLock/
+  Pin/Cow` and `.clone()`; FFI pass B requires the language family and
+  owner to match; integration-test files are qualified
+  `<crate>::tests::<file>` instead of colliding on the crate root.
+
+- **Value references were logged as `ambiguous-in-file` calls.** 940 of
+  the 972 such entries on cgg's own tree were bare identifier arguments.
+  They now carry `value-ref-ambiguous` / `value-ref-no-enclosing`; the
+  dead-code roots and evidence passes accept both alongside the old
+  reasons, so a function passed as a value at module scope keeps its
+  `toplevel:invocation` root (flask: 1,024 roots, 113 findings, identical
+  to 0.8.3). A `Via::Reference` edge is emitted for any target except a
+  closure bound to the same name.
+
+### Added
+
+- **`SkipReason::Minified`.** The walker skips `.min.{js,mjs,cjs,css}`
+  and any file averaging more than 2,000 bytes per line, with an audit
+  row and a summary count. `workbook_still_waters`: 1,005 -> 81 ms; four
+  vendored bundles held 4,490 callables.
+- **The auto `--jobs` cap rises to 32 once a host has 32 physical cores**
+  (was fixed at 8). Graph byte-identical at any job count.
+
+### Compatibility
+
+**The default graph shrinks, deliberately.** This departs from the
+standing rule that the default edge set only ever grows. On cgg's own
+tree the change removes 765 unique edges and adds 79; by call-site byte
+the removals break down as 550 into another file's private `mod tests`
+helper, 188 at sites that keep a surviving edge (a fan-out narrowed to
+one target), 14 FFI edges from a Python stub into the Node binding, and
+20 sites left with no edge, every one read by an independent reader
+(3 were real calls). On `llmitm-v5`: 2,191 removed (1,040 narrowed, 446
+external-head or std-impl, 268 tests-helper, 426 sites left dark: of
+357 read individually 25 were real calls, the rest are the
+macro-argument width rule, roughly 36 real by the sampled rate), 874
+added. Two audit `UnresolvedReason` variants are new, so a 0.8.3 binary
+refuses `--from-graph` on a graph this version writes
+(`unknown variant value-ref-ambiguous`); it fails loudly, not wrongly.
+
+Not covered, and still wrong: a single-segment external receiver
+(`serde_json::from_str(..)` arrives as receiver `serde_json`,
+indistinguishable from a local variable) still produces 64 false edges
+on cgg's tree.
+
+### Performance
+
+`scripts/compare-release.py`, 0.8.3 release binary against this change,
+110 corpus repositories, timing the minimum of two alternating runs
+with eight repos measured concurrently:
+
+| | 0.8.3 | this change |
+| --- | --- | --- |
+| corpus total | 160.3s | 93.9s (**-41.4%**) |
+| edges | 2,623,507 | 2,386,150 (**-9.0%**) |
+| unresolved sites | 4,518,823 | 4,141,367 (**-8.4%**) |
+| repos gaining edges | — | 0 of 110 |
+| 87 repos with identical callables: edges | 1,299,845 | 1,217,505 (**-6.3%**) |
+| same 87: wall | 72.1s | 50.9s (**-29.4%**) |
+
+The wall-clock delta belongs to the walker skip and the job cap; the
+resolver changes are wall-neutral (cgg's own tree 119 -> 104 ms with
+the cap). Repos under 150 ms are noise by this script's own note.
+`determinism-sweep.py`: 25 repos x 3 runs, 0 nondeterministic.
+
 ## [0.8.3] - 2026-08-26
 
 ### Fixed

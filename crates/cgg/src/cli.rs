@@ -212,11 +212,12 @@ pub struct Cli {
     /// Number of parallel worker threads.
     ///
     /// `0` (the default) means auto: half the machine's **physical**
-    /// cores, detected at runtime, capped at 8 and bounded by any cgroup
-    /// quota. The cap keeps cgg a good guest on a large shared host —
-    /// it is not a claim that more threads stop helping. On a big tree
-    /// they do help: pass `--jobs 32` and expect roughly a 2x speedup
-    /// over the default.
+    /// cores, detected at runtime, capped at 8 (32 once physical cores
+    /// reach 32) and bounded by any cgroup quota. The cap keeps cgg a
+    /// good guest on a large shared host — it is not a claim that more
+    /// threads stop helping. On a big tree they do help: pass
+    /// `--jobs 32` and expect roughly a 2x speedup over the small-host
+    /// default.
     #[arg(long = "jobs", value_name = "N", default_value_t = 0)]
     pub jobs: usize,
 

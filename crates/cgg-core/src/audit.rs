@@ -45,6 +45,11 @@ pub enum SkipReason {
     ParseError(String),
     /// File size exceeded the configured threshold.
     TooLarge,
+    /// A minified JS/CSS build artifact: `name.min.<ext>`, or an
+    /// average line length over the walker's minified-source
+    /// threshold on a minifiable extension. Parsing it burns wall time
+    /// for a graph with no useful callable structure.
+    Minified,
 }
 
 impl SkipReason {
@@ -60,6 +65,7 @@ impl SkipReason {
             SkipReason::SymlinkOutsideRoot => "symlink-outside-root",
             SkipReason::ParseError(_) => "parse-error",
             SkipReason::TooLarge => "too-large",
+            SkipReason::Minified => "minified",
         }
     }
 }
@@ -162,6 +168,27 @@ pub enum UnresolvedReason {
     ClassWithoutExplicitInit,
     /// `super().m()` where the base class is outside the analyzed tree.
     SuperBaseOutOfGraph,
+    /// A `VALUE_REF_HINT` site (a bare identifier passed as an
+    /// argument, e.g. `register(handler)`) with two or more same-name
+    /// candidates in scope.
+    ///
+    /// Distinct from [`AmbiguousInFile`], which every existing consumer
+    /// — the `ambiguous-in-file` metrics bucket, the dead-code
+    /// correlation — reads as an ordinary ambiguous *call*. A value
+    /// reference is plumbing, not a call site, and on cgg's own corpus
+    /// it was 96.7% of everything `AmbiguousInFile` reported, drowning
+    /// the real ambiguous calls the label exists to surface.
+    ///
+    /// [`AmbiguousInFile`]: UnresolvedReason::AmbiguousInFile
+    ValueRefAmbiguous { candidates: u32 },
+    /// A `VALUE_REF_HINT` site with no enclosing callable to hang an
+    /// edge on (module scope, class body, a decorator argument).
+    ///
+    /// Distinct from [`NoEnclosingCallable`] for the same reason
+    /// [`ValueRefAmbiguous`] is distinct from `AmbiguousInFile`.
+    ///
+    /// [`NoEnclosingCallable`]: UnresolvedReason::NoEnclosingCallable
+    ValueRefNoEnclosing,
     /// Any other / legacy reason, preserving the original text.
     Other(String),
 }
@@ -194,6 +221,8 @@ impl UnresolvedReason {
             }
             UnresolvedReason::ClassWithoutExplicitInit => "class-without-explicit-init",
             UnresolvedReason::SuperBaseOutOfGraph => "super-base-out-of-graph",
+            UnresolvedReason::ValueRefAmbiguous { .. } => "value-ref-ambiguous",
+            UnresolvedReason::ValueRefNoEnclosing => "value-ref-no-enclosing",
             UnresolvedReason::Other(s) => s.as_str(),
         }
     }
@@ -694,6 +723,7 @@ mod tests {
         assert_eq!(SkipReason::UnknownExtension.slug(), "unknown-extension");
         assert_eq!(SkipReason::Builtin("node_modules".into()).slug(), "builtin");
         assert_eq!(SkipReason::Binary.slug(), "binary");
+        assert_eq!(SkipReason::Minified.slug(), "minified");
     }
 
     #[test]
@@ -771,5 +801,29 @@ mod tests {
         let legacy = r#"{"src":null,"file":"F0","site_line":1,"site_byte":2,"name":"m","reason":"ambiguous-in-file"}"#;
         let c3: AuditUnresolvedCall = serde_json::from_str(legacy).unwrap();
         assert_eq!(c3.reason, UnresolvedReason::AmbiguousInFile);
+    }
+
+    #[test]
+    fn value_ref_reasons_round_trip_and_have_stable_slugs() {
+        let c = AuditUnresolvedCall::new(
+            None,
+            FileId::new(0),
+            1,
+            2,
+            "handler".into(),
+            String::new(),
+            UnresolvedReason::ValueRefAmbiguous { candidates: 2 },
+        );
+        assert_eq!(c.reason.slug(), "value-ref-ambiguous");
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"stage\":\"value-ref-ambiguous\""));
+        let c2: AuditUnresolvedCall = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            c2.reason,
+            UnresolvedReason::ValueRefAmbiguous { candidates: 2 }
+        );
+
+        let n = UnresolvedReason::ValueRefNoEnclosing;
+        assert_eq!(n.slug(), "value-ref-no-enclosing");
     }
 }
